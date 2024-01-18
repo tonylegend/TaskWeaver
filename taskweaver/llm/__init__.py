@@ -7,7 +7,8 @@ from taskweaver.llm.base import CompletionService, EmbeddingService, LLMModuleCo
 from taskweaver.llm.google_genai import GoogleGenAIService
 from taskweaver.llm.mock import MockApiService
 from taskweaver.llm.ollama import OllamaService
-from taskweaver.llm.openai import OpenAIService
+# from taskweaver.llm.openai import OpenAIService
+from taskweaver.llm.custom_openai import OpenAIService
 from taskweaver.llm.placeholder import PlaceholderEmbeddingService
 from taskweaver.llm.sentence_transformer import SentenceTransformerService
 

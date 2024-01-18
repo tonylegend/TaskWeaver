@@ -1,11 +1,13 @@
 import io
 import json
+import re
 from json import JSONDecodeError
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Union
 
 import ijson
 from injector import inject
 
+from autogen.code_utils import extract_code
 from taskweaver.llm.util import ChatMessageType
 from taskweaver.logging import TelemetryLogger
 from taskweaver.memory import Attachment, Post
@@ -52,7 +54,7 @@ class PostTranslator:
                 yield c["content"]
             self.logger.info(f"LLM output: {llm_output}")
 
-        for d in self.parse_llm_output_stream(stream_filter(llm_output)):
+        for d in self.parse_llm_output_stream_1(stream_filter(llm_output)):
             type_str = d["type"]
             type: Optional[AttachmentType] = None
             value = d["content"]
@@ -198,3 +200,103 @@ class PostTranslator:
             self.logger.warning(
                 f"Failed to parse LLM output stream due to JSONError: {str(e)}",
             )
+
+    def parse_llm_output_stream_1(
+        self,
+        llm_output: Iterator[str],
+    ) -> Iterator[Dict[str, str]]:
+        try:
+            full_content = ''
+            prev_content = None
+            for c in llm_output:
+                if prev_content is not None:
+                    full_content += c
+                prev_content = c
+            full_content = prev_content
+            code_blocks = extract_code(full_content) or []
+            json_datas = []
+            for b in code_blocks:
+                if b[0] == 'json' and b[1]:
+                    try:
+                        resp_dict = json.loads(b[1])
+                    except JSONDecodeError:
+                        continue
+                    if 'response' in resp_dict:
+                        json_datas.append(resp_dict)
+            if json_datas:
+                json_data = json_datas[-1]
+            else:
+                for b in extract_all_json_objects_v2(full_content):
+                    if 'response' in b:
+                        json_datas.append(b)
+                if json_datas:
+                    json_data = json_datas[-1]
+                else:
+                    raise JSONDecodeError
+            for element in json_data.get('response', []):
+                yield element
+        except Exception as e:
+            self.logger.error(str(e))
+            raise
+
+
+def extract_json_objects(text: str, decoder=json.JSONDecoder()):
+    """Generate and extract JSON objects from a string."""
+    pos = 0
+    while True:
+        match = text.find('{', pos)
+        if match == -1:
+            break
+        try:
+            result, index = decoder.raw_decode(text[match:])
+            yield result
+            pos = match + index
+        except json.JSONDecodeError as e:
+            pos = match + 1
+
+
+def extract_all_json_objects_v2(text):
+    json_objects = []
+    nesting_level = 0
+    start_index = -1
+
+    # Define replacements as tuples of (pattern, replacement)
+    replacements = [
+        (r'\\\[', '['),
+        (r'\\\]', ']'),
+        (r'\s*\n\s*', ' '),
+    ]
+    # Build a regular expression that matches all patterns
+    pattern = re.compile('|'.join(replacement[0] for replacement in replacements))
+
+    for i, char in enumerate(text):
+        if char == '{':
+            if nesting_level == 0:
+                start_index = i
+            nesting_level += 1
+        elif char == '}':
+            nesting_level -= 1
+            if nesting_level == 0 and start_index != -1:
+                end_index = i + 1
+                json_str = text[start_index:end_index]
+
+                # Preprocessing: Perform replacements
+                def replacer(match):
+                    s = match.group(0)
+                    for pattern, replacement in replacements:
+                        if re.match(pattern, s):
+                            return replacement
+                    return s
+
+                json_str = pattern.sub(replacer, json_str)
+
+                print(json_str)
+                try:
+                    json_object = json.loads(json_str)
+                    json_objects.append(json_object)
+                except json.JSONDecodeError as e:
+                    print(f"{str(e)}")
+                    pass  # Ignore parsing errors and continue
+                start_index = -1  # Reset start index for next JSON object
+
+    return json_objects

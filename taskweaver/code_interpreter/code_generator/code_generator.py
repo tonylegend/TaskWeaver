@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 from typing import List, Optional
 
 from injector import inject
@@ -96,6 +97,8 @@ class CodeGenerator(Role):
             logger.info("Plugin embeddings loaded")
             self.selected_plugin_pool = SelectedPluginPool()
 
+        self._unread_index: defaultdict[str, int] = defaultdict(lambda: 0)
+
     def configure_verification(
         self,
         code_verification_on: bool,
@@ -129,12 +132,12 @@ class CodeGenerator(Role):
     ) -> List[ChatMessageType]:
         chat_history = [format_chat_message(role="system", message=self.instruction)]
 
-        if self.examples is None:
-            self.examples = self.load_examples()
-        for i, example in enumerate(self.examples):
-            chat_history.extend(
-                self.compose_conversation(example.rounds, example.plugins, add_requirements=False),
-            )
+        # if self.examples is None:
+        #     self.examples = self.load_examples()
+        # for i, example in enumerate(self.examples):
+        #     chat_history.extend(
+        #         self.compose_conversation(example.rounds, example.plugins, add_requirements=False),
+        #     )
 
         summary = None
         if self.config.prompt_compression:
@@ -304,11 +307,14 @@ class CodeGenerator(Role):
 
         # obtain the user query from the last round
         query = rounds[-1].post_list[-1].message
+        sender = rounds[-1].post_list[-1].send_from
 
         if self.config.enable_auto_plugin_selection:
             self.plugin_pool = self.select_plugins_for_prompt(query)
 
-        prompt = self.compose_prompt(rounds, self.plugin_pool)
+        chat_history = self.compose_prompt(rounds, self.plugin_pool)
+        chat_history_len = len(chat_history)
+        chat_history = chat_history[self._unread_index[sender]:]
 
         def early_stop(_type: AttachmentType, value: str) -> bool:
             if _type in [AttachmentType.text, AttachmentType.python, AttachmentType.sample]:
@@ -318,8 +324,11 @@ class CodeGenerator(Role):
 
         self.post_translator.raw_text_to_post(
             llm_output=self.llm_api.chat_completion_stream(
-                prompt,
+                chat_history,
                 use_backup_engine=use_back_up_engine,
+                sender=sender,
+                recipient="CodeInterpreter",
+                stream=False,
             ),
             post_proxy=post_proxy,
             early_stop=early_stop,
@@ -339,8 +348,9 @@ class CodeGenerator(Role):
             self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
 
         if prompt_log_path is not None:
-            self.logger.dump_log_file(prompt, prompt_log_path)
+            self.logger.dump_log_file(chat_history, prompt_log_path)
 
+        self._unread_index[sender] = chat_history_len + 1
         return post_proxy.post
 
     def format_plugins(

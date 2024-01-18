@@ -84,21 +84,21 @@ class LoggingModule(Module):
     def provide_logger(self, config: LoggingModuleConfig) -> logging.Logger:
         logger = logging.getLogger(__name__)
 
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
 
         if not any(isinstance(handler, logging.FileHandler) for handler in logger.handlers):
             if not os.path.exists(config.log_full_path):
                 os.makedirs(os.path.dirname(config.log_full_path), exist_ok=True)
                 open(config.log_full_path, "w").close()
             file_handler = logging.FileHandler(config.log_full_path)
-            file_handler.setLevel(logging.INFO)
+            file_handler.setLevel(logging.DEBUG)
             log_format = "%(asctime)s - %(levelname)s - %(message)s"
             formatter = logging.Formatter(log_format)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
 
         if config.injector:
-            logging.getLogger("injector").setLevel(logging.INFO)
+            logging.getLogger("injector").setLevel(logging.DEBUG)
 
         return logger
 

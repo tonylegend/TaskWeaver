@@ -1,5 +1,6 @@
 import json
 import os
+from collections import defaultdict
 from json import JSONDecodeError
 from typing import Iterable, List, Optional
 
@@ -111,6 +112,8 @@ class Planner(Role):
         self.round_compressor = round_compressor
         self.compression_template = read_yaml(self.config.compression_prompt_path)["content"]
 
+        self._unread_index: defaultdict[str, int] = defaultdict(lambda: 0)
+
         self.logger.info("Planner initialized successfully")
 
     def compose_conversation_for_prompt(
@@ -216,10 +219,16 @@ class Planner(Role):
     ) -> Post:
         rounds = memory.get_role_rounds(role="Planner")
         assert len(rounds) != 0, "No chat rounds found for planner"
+
+        sender = rounds[-1].post_list[-1].send_from
+
         new_post = self.event_emitter.create_post_proxy("Planner")
 
         new_post.update_status("composing prompt")
         chat_history = self.compose_prompt(rounds)
+
+        chat_history_len = len(chat_history)
+        chat_history = chat_history[self._unread_index[sender]:]
 
         def check_post_validity(post: Post):
             assert post.send_to is not None, "send_to field is None"
@@ -241,6 +250,9 @@ class Planner(Role):
             llm_stream = self.llm_api.chat_completion_stream(
                 chat_history,
                 use_backup_engine=use_back_up_engine,
+                sender=sender,
+                recipient="Planner",
+                stream=False,
             )
 
         llm_output: List[str] = []
@@ -281,6 +293,8 @@ class Planner(Role):
                 raise Exception(f"Planner failed to generate response because {str(e)}")
         if prompt_log_path is not None:
             self.logger.dump_log_file(chat_history, prompt_log_path)
+
+        self._unread_index[sender] = chat_history_len + 1
         return new_post.end()
 
     def get_examples(self) -> List[Conversation]:
