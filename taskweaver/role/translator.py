@@ -2,7 +2,7 @@ import io
 import json
 import re
 from json import JSONDecodeError
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Literal, Optional, Union, Tuple
 
 import ijson
 from injector import inject
@@ -13,6 +13,7 @@ from taskweaver.logging import TelemetryLogger
 from taskweaver.memory import Attachment, Post
 from taskweaver.memory.attachment import AttachmentType
 from taskweaver.module.event_emitter import PostEventProxy, SessionEventEmitter
+from taskweaver.utils import json_parser
 
 
 class PostTranslator:
@@ -36,6 +37,7 @@ class PostTranslator:
         post_proxy: PostEventProxy,
         early_stop: Optional[Callable[[Union[AttachmentType, Literal["message", "send_to"]], str], bool]] = None,
         validation_func: Optional[Callable[[Post], None]] = None,
+        use_v2_parser: bool = False,
     ) -> None:
         """
         Convert the raw text output of LLM to a Post object.
@@ -52,28 +54,51 @@ class PostTranslator:
             for c in s:
                 full_llm_content += c["content"]
                 yield c["content"]
-            self.logger.info(f"LLM output: {llm_output}")
+            self.logger.info(f"LLM output: {full_llm_content}")
 
-        for d in self.parse_llm_output_stream_1(stream_filter(llm_output)):
-            type_str = d["type"]
+        value_buf: str = ""
+        filtered_stream = stream_filter(llm_output)
+        parser_stream = (
+            self.parse_llm_output_stream_v2(filtered_stream)
+            if use_v2_parser
+            else self.parse_llm_output_stream_v1(filtered_stream)
+        )
+        cur_attachment: Optional[Attachment] = None
+        for type_str, value, is_end in parser_stream:
+            value_buf += value
             type: Optional[AttachmentType] = None
-            value = d["content"]
             if type_str == "message":
-                post_proxy.update_message(value)
+                post_proxy.update_message(value_buf, is_end=is_end)
+                value_buf = ""
             elif type_str == "send_to":
-                assert value in [
-                    "User",
-                    "Planner",
-                    "CodeInterpreter",
-                ], f"Invalid send_to value: {value}"
-                post_proxy.update_send_to(value)  # type: ignore
+                if is_end:
+                    assert value_buf in [
+                        "User",
+                        "Planner",
+                        "CodeInterpreter",
+                    ], f"Invalid send_to value: {value}"
+                    post_proxy.update_send_to(value_buf)  # type: ignore
+                    value_buf = ""
+                else:
+                    # collect the whole content before updating post
+                    pass
             else:
                 try:
                     type = AttachmentType(type_str)
-                    post_proxy.update_attachment(value, type)
+                    if cur_attachment is not None:
+                        assert type == cur_attachment.type
+                    cur_attachment = post_proxy.update_attachment(
+                        value_buf,
+                        type,
+                        id=(cur_attachment.id if cur_attachment is not None else None),
+                        is_end=is_end,
+                    )
+                    value_buf = ""
+                    if is_end:
+                        cur_attachment = None
                 except Exception as e:
                     self.logger.warning(
-                        f"Failed to parse attachment: {d} due to {str(e)}",
+                        f"Failed to parse attachment: {type_str}-{value_buf} due to {str(e)}",
                     )
                     continue
             parsed_type = (
@@ -86,7 +111,9 @@ class PostTranslator:
                 else None
             )
             assert parsed_type is not None, f"Invalid type: {type_str}"
-            if early_stop is not None and early_stop(parsed_type, value):
+
+            # check whether parsing should be triggered prematurely when each key parsing is finished
+            if is_end and early_stop is not None and early_stop(parsed_type, value):
                 break
 
         if validation_func is not None:
@@ -141,7 +168,7 @@ class PostTranslator:
     def parse_llm_output_stream(
         self,
         llm_output: Iterator[str],
-    ) -> Iterator[Dict[str, str]]:
+    ) -> Iterator[Tuple[str, str, bool]]:
         class StringIteratorIO(io.TextIOBase):
             def __init__(self, iter: Iterator[str]):
                 self._iter = iter
@@ -181,30 +208,31 @@ class PostTranslator:
         # use small buffer to get parse result as soon as acquired from LLM
         parser = ijson.parse(json_data_stream, buf_size=5)
 
-        element = {}
+        cur_type: Optional[str] = None
+        cur_content: Optional[str] = None
         try:
             for prefix, event, value in parser:
                 if prefix == "response.item" and event == "map_key" and value == "type":
-                    element["type"] = None
+                    cur_type = None
                 elif prefix == "response.item.type" and event == "string":
-                    element["type"] = value
+                    cur_type = value
                 elif prefix == "response.item" and event == "map_key" and value == "content":
-                    element["content"] = None
+                    cur_content = None
                 elif prefix == "response.item.content" and event == "string":
-                    element["content"] = value
+                    cur_content = value
 
-                if len(element) == 2 and None not in element.values():
-                    yield element
-                    element = {}
+                if cur_type is not None and cur_content is not None:
+                    yield cur_type, cur_content, True
+                    cur_type, cur_content = None, None
         except ijson.JSONError as e:
             self.logger.warning(
                 f"Failed to parse LLM output stream due to JSONError: {str(e)}",
             )
 
-    def parse_llm_output_stream_1(
+    def parse_llm_output_stream_v1(
         self,
         llm_output: Iterator[str],
-    ) -> Iterator[Dict[str, str]]:
+    ) -> Iterator[Tuple[str, str, bool]]:
         try:
             full_content = ''
             prev_content = None
@@ -233,11 +261,83 @@ class PostTranslator:
                     json_data = json_datas[-1]
                 else:
                     raise JSONDecodeError
-            for element in json_data.get('response', []):
-                yield element
+            stream_output = json_data.get('response', [])
+            for i in range(len(stream_output)):
+                is_end = i == len(stream_output) - 1
+                yield stream_output[i] + (is_end,)
         except Exception as e:
             self.logger.error(str(e))
             raise
+
+    def parse_llm_output_stream_v2(
+        self,
+        llm_output: Iterator[str],
+    ) -> Iterator[Tuple[str, str, bool]]:
+        parser = json_parser.parse_json_stream(llm_output, skip_after_root=True)
+        root_element_prefix = ".response"
+
+        list_begin, list_end = False, False
+        item_idx = 0
+
+        cur_content_sent: bool = False
+        cur_content_sent_end: bool = False
+        cur_type: Optional[str] = None
+        cur_content: Optional[str] = None
+
+        try:
+            for ev in parser:
+                if ev.prefix == root_element_prefix:
+                    if ev.event == "start_array":
+                        list_begin = True
+                    if ev.event == "end_array":
+                        list_end = True
+
+                if not list_begin or list_end:
+                    continue
+
+                cur_item_prefix = f"{root_element_prefix}[{item_idx}]"
+                if ev.prefix == cur_item_prefix:
+                    if ev.event == "start_map":
+                        cur_content_sent, cur_content_sent_end = False, False
+                        cur_type, cur_content = None, None
+                    if ev.event == "end_map":
+                        if cur_type is None or cur_content is None:
+                            raise Exception(
+                                f"Incomplete generate kv pair in index {item_idx}. "
+                                f"type: {cur_type} content {cur_content}",
+                            )
+
+                        if cur_content_sent and not cur_content_sent_end:
+                            # possible incomplete string, trigger end prematurely
+                            yield cur_type, "", True
+
+                        if not cur_content_sent:
+                            yield cur_type, cur_content, True
+
+                        cur_content_sent, cur_content_sent_end = False, False
+                        cur_type, cur_content = None, None
+                        item_idx += 1
+
+                if ev.prefix == cur_item_prefix + ".type":
+                    if ev.event == "string" and ev.is_end:
+                        cur_type = ev.value
+
+                if ev.prefix == cur_item_prefix + ".content":
+                    if ev.event == "string":
+                        if cur_type is not None:
+                            cur_content_sent = True
+                            yield cur_type, ev.value_str, ev.is_end
+
+                            assert not cur_content_sent_end, "Invalid state: already sent is_end marker"
+                            if ev.is_end:
+                                cur_content_sent_end = True
+                        if ev.is_end:
+                            cur_content = ev.value
+
+        except json_parser.StreamJsonParserError as e:
+            self.logger.warning(
+                f"Failed to parse LLM output stream due to JSONError: {str(e)}",
+            )
 
 
 def extract_json_objects(text: str, decoder=json.JSONDecoder()):
@@ -300,3 +400,5 @@ def extract_all_json_objects_v2(text):
                 start_index = -1  # Reset start index for next JSON object
 
     return json_objects
+
+
