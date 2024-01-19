@@ -52,6 +52,8 @@ class CodeGeneratorConfig(ModuleConfig):
         )
         self.auto_plugin_selection_topk = self._get_int("auto_plugin_selection_topk", 3)
 
+        self.assistant_id = self._get_str("assistant_id", default='')
+
 
 class CodeGenerator(Role):
     @inject
@@ -130,7 +132,8 @@ class CodeGenerator(Role):
         rounds: List[Round],
         plugins: List[PluginEntry],
     ) -> List[ChatMessageType]:
-        chat_history = [format_chat_message(role="system", message=self.instruction)]
+        chat_history = [] if self.config.assistant_id else \
+            [format_chat_message(role="system", message=self.instruction)]
 
         # if self.examples is None:
         #     self.examples = self.load_examples()
@@ -329,6 +332,8 @@ class CodeGenerator(Role):
                 sender=sender,
                 recipient="CodeInterpreter",
                 stream=False,
+                assistant_id=self.config.assistant_id,
+                use_smoother=False,
             ),
             post_proxy=post_proxy,
             early_stop=early_stop,

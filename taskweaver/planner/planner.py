@@ -57,6 +57,8 @@ class PlannerConfig(ModuleConfig):
         ) as f:
             self.dummy_plan = json.load(f)
 
+        self.assistant_id = self._get_str("assistant_id", default='')
+
 
 class Planner(Role):
     conversation_delimiter_message: str = "Let's start the new conversation!"
@@ -182,7 +184,8 @@ class Planner(Role):
         return conversation
 
     def compose_prompt(self, rounds: List[Round]) -> List[ChatMessageType]:
-        chat_history = [format_chat_message(role="system", message=self.instruction)]
+        chat_history = [] if self.config.assistant_id else \
+            [format_chat_message(role="system", message=self.instruction)]
 
         if self.config.use_example and len(self.examples) != 0:
             for conv_example in self.examples:
@@ -257,6 +260,8 @@ class Planner(Role):
                 sender=sender,
                 recipient="Planner",
                 stream=False,
+                assistant_id=self.config.assistant_id,
+                use_smoother=False,
             )
 
         llm_output: List[str] = []

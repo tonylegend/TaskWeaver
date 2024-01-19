@@ -235,12 +235,12 @@ class PostTranslator:
     ) -> Iterator[Tuple[str, str, bool]]:
         try:
             full_content = ''
-            prev_content = None
+            # prev_content = None
             for c in llm_output:
-                if prev_content is not None:
-                    full_content += c
-                prev_content = c
-            full_content = prev_content
+                # if prev_content is not None:
+                full_content += c
+                # prev_content = c
+            # full_content = prev_content
             code_blocks = extract_code(full_content) or []
             json_datas = []
             for b in code_blocks:
@@ -263,8 +263,7 @@ class PostTranslator:
                     raise JSONDecodeError
             stream_output = json_data.get('response', [])
             for i in range(len(stream_output)):
-                is_end = i == len(stream_output) - 1
-                yield stream_output[i] + (is_end,)
+                yield stream_output[i]['type'], stream_output[i]['content'], True
         except Exception as e:
             self.logger.error(str(e))
             raise
@@ -364,6 +363,11 @@ def extract_all_json_objects_v2(text):
     replacements = [
         (r'\\\[', '['),
         (r'\\\]', ']'),
+        (r'\\\>', '>'),
+        (r'\\\<', '<'),
+        (r'\\\*', '<'),
+        (r'\\\#', '<'),
+        (r'\\\\n', r'\n'),
         (r'\s*\n\s*', ' '),
     ]
     # Build a regular expression that matches all patterns
