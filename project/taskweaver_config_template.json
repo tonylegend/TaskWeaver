@@ -6,6 +6,9 @@
 "llm.openai.session_token": "YOUR_OPENAI_SESSION_TOKEN",
 "llm.openai.google_api_key": "YOUR GOOGLE API KEY",
 "planner.use_example": false,
-"session.code_interpreter_only": true,
-"code_generator.enable_auto_plugin_selection": true
+"planner.assistant_id": "",
+"session.code_interpreter_only": false,
+"code_generator.enable_auto_plugin_selection": true,
+"code_interpreter.code_verification_on": true,
+"code_generator.assistant_id": ""
 }
